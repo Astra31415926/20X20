@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Игра "Точки"</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #ffffff;
+    color: #111;
+    font-family: -apple-system, "Segoe UI", Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 12px 40px;
+  }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 4px; }
+  #rules {
+    max-width: 600px;
+    font-size: 13px;
+    color: #555;
+    text-align: center;
+    margin: 0 0 14px;
+    line-height: 1.4;
+  }
+  #scoreboard { display: flex; gap: 28px; font-size: 16px; margin-bottom: 10px; }
+  .score-blue { color: #1a56db; font-weight: 700; }
+  .score-red  { color: #d61f1f; font-weight: 700; }
+  #status { min-height: 22px; font-size: 14px; margin-bottom: 10px; color: #333; }
+  canvas { background: #ffffff; border: 1px solid #ddd; cursor: pointer; touch-action: none; }
+  #controls { margin-top: 14px; }
+  button {
+    background: #111; color: #fff; border: none; padding: 9px 18px;
+    font-size: 14px; border-radius: 6px; cursor: pointer;
+  }
+  button:hover { background: #333; }
+</style>
+</head>
+<body>
+
+<h1>Точки</h1>
+<p id="rules">
+  По очереди ставьте точки на пересечения линий сетки (вы — синие, компьютер — красные).
+  Если ваши точки замыкают область, в которой оказались точки соперника — эти точки захватываются,
+  а территория внутри окрашивается в ваш цвет.
+</p>
+
+<div id="scoreboard">
+  <div>Вы (синие): <span class="score-blue" id="scoreBlue">0</span></div>
+  <div>Компьютер (красные): <span class="score-red" id="scoreRed">0</span></div>
+</div>
+
+<div id="status">Ваш ход</div>
+
+<canvas id="board" width="582" height="582"></canvas>
+
+<div id="controls">
+  <button id="restart">Новая игра</button>
+</div>
+
+<script>
+(function(){
+  const SIZE = 20;
+  const CELL = 28;
+  const MARGIN = 25;
+  const DOT_R = 6.5;
+  const HUMAN = 1;
+  const AI = 2;
+  const COLORS = { 1: '#1a56db', 2: '#d61f1f' };
+  const TERRITORY_COLORS = { 1: 'rgba(26,86,219,0.13)', 2: 'rgba(214,31,31,0.13)' };
+
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const scoreBlueEl = document.getElementById('scoreBlue');
+  const scoreRedEl = document.getElementById('scoreRed');
+  const statusEl = document.getElementById('status');
+  const restartBtn = document.getElementById('restart');
+
+  let grid, scores, currentPlayer, gameOver;
+
+  function initGrid(){
+    grid = [];
+    for (let y = 0; y < SIZE; y++){
+      const row = [];
+      for (let x = 0; x < SIZE; x++){
+        row.push({ owner: 0, captured: false, territory: 0 });
+      }
+      grid.push(row);
+    }
+    scores = { 1: 0, 2: 0 };
+    currentPlayer = HUMAN;
+    gameOver = false;
+    updateScoreboard();
+    updateStatus();
+    draw();
+  }
+
+  function toXY(gx, gy){
+    return [MARGIN + gx * CELL, MARGIN + gy * CELL];
+  }
+
+  function nearestCell(px, py){
+    const gx = Math.round((px - MARGIN) / CELL);
+    const gy = Math.round((py - MARGIN) / CELL);
+    if (gx < 0 || gx >= SIZE || gy < 0 || gy >= SIZE) return null;
+    const [cx, cy] = toXY(gx, gy);
+    if (Math.hypot(px - cx, py - cy) > CELL * 0.42) return null;
+    return [gx, gy];
+  }
+
+  function isBoardFull(){
+    for (let y = 0; y < SIZE; y++)
+      for (let x = 0; x < SIZE; x++)
+        if (grid[y][x].owner === 0) return false;
+    return true;
+  }
+
+  function cloneGrid(g){
+    return g.map(row => row.map(c => ({ owner: c.owner, captured: c.captured, territory: c.territory })));
+  }
+
+  // Flood fill от границ поля по клеткам, НЕ занятым точками "player".
+  // Всё, что не достигнуто заливкой снаружи — считается замкнутой (окружённой) областью.
+  function detectCaptures(g, player){
+    const opponent = player === HUMAN ? AI : HUMAN;
+    const outside = Array.from({ length: SIZE }, () => new Array(SIZE).fill(false));
+    const queue = [];
+
+    function tryAdd(x, y){
+      if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return;
+      if (outside[y][x]) return;
+      if (g[y][x].owner === player) return;
+      outside[y][x] = true;
+      queue.push([x, y]);
+    }
+
+    for (let x = 0; x < SIZE; x++){ tryAdd(x, 0); tryAdd(x, SIZE - 1); }
+    for (let y = 0; y < SIZE; y++){ tryAdd(0, y); tryAdd(SIZE - 1, y); }
+
+    while (queue.length){
+      const [x, y] = queue.shift();
+      tryAdd(x + 1, y); tryAdd(x - 1, y);
+      tryAdd(x, y + 1); tryAdd(x, y - 1);
+    }
+
+    let capturedCount = 0;
+    for (let y = 0; y < SIZE; y++){
+      for (let x = 0; x < SIZE; x++){
+        if (outside[y][x]) continue;
+        if (g[y][x].owner === player) continue;
+        if (g[y][x].owner === opponent){
+          if (!g[y][x].captured){
+            g[y][x].captured = true;
+            capturedCount++;
+          }
+          g[y][x].territory = player;
+        } else if (g[y][x].owner === 0){
+          g[y][x].territory = player;
+        }
+      }
+    }
+    return capturedCount;
+  }
+
+  function countPotentialCaptures(g, x, y, player){
+    if (g[y][x].owner !== 0) return -1;
+    const clone = cloneGrid(g);
+    clone[y][x].owner = player;
+    return detectCaptures(clone, player);
+  }
+
+  function neighborCount(g, x, y, player){
+    let n = 0;
+    for (let dy = -1; dy <= 1; dy++){
+      for (let dx = -1; dx <= 1; dx++){
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx, ny = y + dy;
+        if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE && g[ny][nx].owner === player) n++;
+      }
+    }
+    return n;
+  }
+
+  function makeMove(gx, gy, player){
+    grid[gy][gx].owner = player;
+    const captured = detectCaptures(grid, player);
+    scores[player] += captured;
+    draw();
+    updateScoreboard();
+
+    if (isBoardFull()){
+      endGame();
+      return;
+    }
+
+    currentPlayer = player === HUMAN ? AI : HUMAN;
+    updateStatus();
+
+    if (currentPlayer === AI && !gameOver){
+      setTimeout(aiMove, 350);
+    }
+  }
+
+  function aiMove(){
+    if (gameOver) return;
+
+    // 1) Атака: ход, дающий максимум захватов
+    let bestMove = null, bestScore = -1;
+    for (let y = 0; y < SIZE; y++){
+      for (let x = 0; x < SIZE; x++){
+        if (grid[y][x].owner !== 0) continue;
+        const c = countPotentialCaptures(grid, x, y, AI);
+        if (c > bestScore){ bestScore = c; bestMove = [x, y]; }
+      }
+    }
+    if (bestScore > 0){
+      makeMove(bestMove[0], bestMove[1], AI);
+      return;
+    }
+
+    // 2) Защита: если следующим ходом игрок может что-то захватить — занять клетку
+    let threatMove = null, threatScore = -1;
+    for (let y = 0; y < SIZE; y++){
+      for (let x = 0; x < SIZE; x++){
+        if (grid[y][x].owner !== 0) continue;
+        const c = countPotentialCaptures(grid, x, y, HUMAN);
+        if (c > threatScore){ threatScore = c; threatMove = [x, y]; }
+      }
+    }
+    if (threatScore > 0){
+      makeMove(threatMove[0], threatMove[1], AI);
+      return;
+    }
+
+    // 3) Эвристика: свои скопления + помеха сопернику + тяга к центру + случайность
+    const center = (SIZE - 1) / 2;
+    let best = null, bestWeight = -Infinity;
+    for (let y = 0; y < SIZE; y++){
+      for (let x = 0; x < SIZE; x++){
+        if (grid[y][x].owner !== 0) continue;
+        const own = neighborCount(grid, x, y, AI);
+        const opp = neighborCount(grid, x, y, HUMAN);
+        const dist = Math.hypot(x - center, y - center);
+        let weight = own * 2.2 + opp * 1.1 - dist * 0.05 + Math.random() * 1.5;
+        if (weight > bestWeight){ bestWeight = weight; best = [x, y]; }
+      }
+    }
+    if (best){
+      makeMove(best[0], best[1], AI);
+    }
+  }
+
+  function updateScoreboard(){
+    scoreBlueEl.textContent = scores[HUMAN];
+    scoreRedEl.textContent = scores[AI];
+  }
+
+  function updateStatus(){
+    if (gameOver) return;
+    statusEl.textContent = currentPlayer === HUMAN
+      ? 'Ваш ход (синие)'
+      : 'Ход компьютера (красные)...';
+  }
+
+  function endGame(){
+    gameOver = true;
+    let text;
+    if (scores[HUMAN] > scores[AI]) text = 'Игра окончена. Победили вы!';
+    else if (scores[AI] > scores[HUMAN]) text = 'Игра окончена. Победил компьютер.';
+    else text = 'Игра окончена. Ничья.';
+    statusEl.textContent = text;
+  }
+
+  function draw(){
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (let y = 0; y < SIZE; y++){
+      for (let x = 0; x < SIZE; x++){
+        const cell = grid[y][x];
+        if (cell.territory){
+          const [cx, cy] = toXY(x, y);
+          ctx.fillStyle = TERRITORY_COLORS[cell.territory];
+          ctx.fillRect(cx - CELL/2, cy - CELL/2, CELL, CELL);
+        }
+      }
+    }
+
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1;
+    const last = MARGIN + (SIZE - 1) * CELL;
+    for (let i = 0; i < SIZE; i++){
+      const pos = MARGIN + i * CELL;
+      ctx.beginPath(); ctx.moveTo(pos, MARGIN); ctx.lineTo(pos, last); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(MARGIN, pos); ctx.lineTo(last, pos); ctx.stroke();
+    }
+
+    for (let y = 0; y < SIZE; y++){
+      for (let x = 0; x < SIZE; x++){
+        const cell = grid[y][x];
+        if (cell.owner === 0) continue;
+        const [cx, cy] = toXY(x, y);
+
+        if (cell.captured){
+          ctx.beginPath();
+          ctx.arc(cx, cy, DOT_R + 4, 0, Math.PI * 2);
+          ctx.strokeStyle = COLORS[cell.territory];
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+
+        ctx.beginPath();
+        ctx.arc(cx, cy, DOT_R, 0, Math.PI * 2);
+        ctx.fillStyle = COLORS[cell.owner];
+        ctx.fill();
+      }
+    }
+  }
+
+  canvas.addEventListener('click', (e) => {
+    if (gameOver || currentPlayer !== HUMAN) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const cell = nearestCell(px, py);
+    if (!cell) return;
+    const [gx, gy] = cell;
+    if (grid[gy][gx].owner !== 0) return;
+    makeMove(gx, gy, HUMAN);
+  });
+
+  restartBtn.addEventListener('click', initGrid);
+
+  initGrid();
+})();
+</script>
+
+</body>
+</html>
